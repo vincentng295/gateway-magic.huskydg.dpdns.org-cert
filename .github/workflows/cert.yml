@@ -1,0 +1,58 @@
+name: Issue Let's Encrypt certificate
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"   # 03:00 UTC ngày 1 hằng tháng (cert sống 90 ngày)
+  workflow_dispatch:       # cho phép chạy tay
+
+permissions:
+  contents: write          # cần để tạo/cập nhật release
+
+env:
+  DOMAIN: gateway-magic.huskydg.dpdns.org
+  EMAIL: deadboltsx303@gmail.com
+  RELEASE_TAG: cert
+
+jobs:
+  issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install certbot
+        run: pip install certbot certbot-dns-cloudflare
+
+      - name: Cloudflare credentials
+        run: |
+          mkdir -p le/config le/work le/logs out
+          echo "dns_cloudflare_api_token = ${{ secrets.CF_TOKEN }}" > le/cloudflare.ini
+          chmod 600 le/cloudflare.ini
+
+      - name: Request certificate
+        run: |
+          certbot certonly \
+            --dns-cloudflare \
+            --dns-cloudflare-credentials le/cloudflare.ini \
+            --dns-cloudflare-propagation-seconds 30 \
+            -d "$DOMAIN" -d "*.$DOMAIN" \
+            --email "$EMAIL" --agree-tos --no-eff-email \
+            --non-interactive \
+            --config-dir le/config --work-dir le/work --logs-dir le/logs
+
+      - name: Prepare files
+        run: |
+          live="le/config/live/$DOMAIN"
+          cp -L "$live/fullchain.pem" "$live/privkey.pem" "$live/cert.pem" "$live/chain.pem" out/
+          cd out && zip gateway-magic-cert.zip *.pem
+          echo "EXPIRES=$(openssl x509 -enddate -noout -in fullchain.pem | cut -d= -f2)" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          NOTES="Cert cho \`$DOMAIN\` và \`*.$DOMAIN\`. Cập nhật: $(date -u +'%Y-%m-%d %H:%M UTC'). Hết hạn: $EXPIRES"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" --title "Latest certificate" --notes "$NOTES"
+          fi
+          gh release upload "$RELEASE_TAG" out/* --clobber
